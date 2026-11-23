@@ -1,0 +1,233 @@
+#=================================================
+# https://github.com/iflyelf/autosys
+# Lisence: MIT
+# Author: iflyelf
+# Blog: https://www.xiaonuo.live
+#=================================================
+
+name: 自动编译并上传镜像(autosys)
+
+# 镜像推送目标（Docker Hub + 华为云 SWR）
+# 组织名称可直接修改, 凭据通过 Secrets 配置:
+#   DOCKER_USERNAME / DOCKER_PASSWORD  Docker Hub
+#   SWR_USERNAME / SWR_PASSWORD        华为云 SWR 登录凭据
+#   SWR_AK / SWR_SK                    华为云 AK/SK (可选, 用于把仓库设为公开)
+env:
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_ORGANIZATION: iflyelf
+  IMAGE_NAME: autosys
+  UPSTREAM_REPO: semaphoreui/semaphore
+
+# 设置触发条件
+on:
+  # 编辑文件触发开始编译
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'scripts/**'
+      - 'i18n/**'
+      - 'conf/**'
+      - '.github/workflows/docker-publish.yml'
+  # 手动触发工作流 (可指定上游版本 Tag, 留空自动取最新正式版)
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'semaphore 版本 Tag (如 v2.20.23), 留空自动取 GitHub 最新正式版'
+        required: false
+        default: ''
+  # 定时触发编译(中国时间每天早5点, UTC 前一天21点), 上游发版后自动跟进
+  schedule:
+    - cron: '0 21 * * *'
+  # 点☆Star触发开始编译
+  watch:
+    types: [started]
+
+# 同一分支仅保留最新一次构建：快速连续提交时自动取消旧构建，
+# 避免多个多架构（QEMU）构建并发堆积、互相拖慢导致镜像迟迟不更新。
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+# 任务集
+jobs:
+  #=================================================
+  # 1. 解析上游最新正式版本 (GitHub API 优先, 失败则回退 git ls-remote)
+  #=================================================
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.latest.outputs.version }}  # 不带 v, 用于镜像 tag
+      ref: ${{ steps.latest.outputs.ref }}          # 带 v, 用于源码 checkout 与 VERSION
+    steps:
+      - name: 获取 semaphore 最新版本
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          V="${INPUT_VERSION:-}"
+          api() { curl -fsSL --retry 3 --max-time 30 \
+                    -H "Authorization: Bearer ${GH_TOKEN}" \
+                    -H "Accept: application/vnd.github+json" "$1"; }
+          stable() { grep -E '^v?[0-9]+(\.[0-9]+)+$' || true; }
+
+          # 1) 显式指定
+          [ -n "$V" ] && echo "使用手动指定的版本: $V"
+
+          # 2) GitHub Releases 最新正式版 (上游会打 rc / beta tag, 只认正式 release)
+          if [ -z "$V" ]; then
+            V=$(api "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" \
+                | jq -r '.tag_name // empty' | stable)
+          fi
+
+          # 3) 兜底: git tags 中最大的正式版本号
+          if [ -z "$V" ]; then
+            V=$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" \
+                | awk -F/ '{print $NF}' | stable | sort -V | tail -1)
+          fi
+
+          [ -n "$V" ] || { echo "ERROR: 无法解析 semaphore 最新版本" >&2; exit 1; }
+
+          case "$V" in
+            v*) REF="$V" ;;
+            *)  REF="v$V" ;;
+          esac
+          echo "ref=${REF}" >> "${GITHUB_OUTPUT}"
+          echo "version=${REF#v}" >> "${GITHUB_OUTPUT}"
+          echo "✅ 解析到 semaphore 版本: ${REF}"
+
+  #=================================================
+  # 2. 多架构构建并推送
+  #=================================================
+  build:
+    needs: [resolve-version]
+    runs-on: ubuntu-latest
+    # schedule / workflow_dispatch(含 update-version.yml 自动触发) 直接放行; 其余仅限仓库所有者
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event.repository.owner.id == github.event.sender.id
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - DOCKER_TAG: latest
+
+    # 权限
+    permissions:
+      actions: write
+      contents: read
+
+    # 运行步骤
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: all
+
+      - name: 安装 docker buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          version: latest
+
+      - name: 登录 DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 登录华为云 SWR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - name: 构建镜像并发布
+        uses: docker/build-push-action@v6
+        # 华为云 SWR 不支持 OCI media types 与证明清单(attestation)，
+        # 否则报 "Invalid image, fail to parse 'manifest.json'"。
+        # 关闭 provenance/sbom 并输出 Docker 媒体类型以兼容 SWR。
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          provenance: false
+          sbom: false
+          outputs: type=image,oci-mediatypes=false
+          # GitHub 托管机在海外, 构建时使用官方源
+          build-args: |
+            SEMAPHORE_REF=${{ needs.resolve-version.outputs.ref }}
+            VERSION=${{ needs.resolve-version.outputs.ref }}
+            GOPROXY=https://proxy.golang.org,direct
+            NPM_REGISTRY=https://registry.npmjs.org
+            PIP_INDEX_URL=https://pypi.org/simple
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ matrix.DOCKER_TAG }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
+            ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:${{ matrix.DOCKER_TAG }}
+            ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 构建后用 amd64 镜像做冒烟测试: SQLite 初始化 + 登录 + 中文界面 + ansible 可用
+      - name: 冒烟测试（linux/amd64）
+        env:
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}"
+          bash scripts/smoke-test.sh "${IMAGE}"
+
+      - name: 清理冒烟测试容器
+        if: always()
+        run: docker rm -f autosys-smoke 2>/dev/null || true
+
+      # 华为云 SWR 镜像仓库默认私有，push 后调用 SWR API 设为公开
+      # 需 Secrets: SWR_AK / SWR_SK（华为云账号 AK/SK，具备 swr:repo:updateRepo 权限）
+      - name: 设置 SWR 镜像为公开
+        env:
+          CLOUD_SDK_AK: ${{ secrets.SWR_AK }}
+          CLOUD_SDK_SK: ${{ secrets.SWR_SK }}
+          SWR_REGION: cn-east-3
+          SWR_ORGANIZATION: ${{ env.SWR_ORGANIZATION }}
+          SWR_REPOSITORY: ${{ env.IMAGE_NAME }}
+        run: |
+          if [ -z "$CLOUD_SDK_AK" ] || [ -z "$CLOUD_SDK_SK" ]; then
+            echo "未配置 SWR_AK / SWR_SK，跳过设置公开"
+            exit 0
+          fi
+          pip install --quiet huaweicloudsdkcore huaweicloudsdkswr
+          python - <<'PY'
+          import os
+          from huaweicloudsdkcore.auth.credentials import BasicCredentials
+          from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+          from huaweicloudsdkswr.v2 import SwrClient
+          from huaweicloudsdkswr.v2.model import UpdateRepoRequest, UpdateRepoRequestBody
+
+          client = SwrClient.new_builder() \
+              .with_credentials(BasicCredentials(os.environ["CLOUD_SDK_AK"], os.environ["CLOUD_SDK_SK"])) \
+              .with_region(SwrRegion.value_of(os.environ["SWR_REGION"])) \
+              .build()
+
+          req = UpdateRepoRequest()
+          req.namespace = os.environ["SWR_ORGANIZATION"]
+          req.repository = os.environ["SWR_REPOSITORY"]
+          req.body = UpdateRepoRequestBody(is_public=True)
+          client.update_repo(req)
+          print(f"✅ 已设为公开: {req.namespace}/{req.repository}")
+          PY
+
+      - name: 删除旧的GitHub-workflow
+        uses: Mattraks/delete-workflow-runs@main
+        with:
+          repository: ${{ github.repository }}
+          retain_days: 1
+          keep_minimum_runs: 3

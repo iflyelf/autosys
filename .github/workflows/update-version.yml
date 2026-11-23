@@ -1,0 +1,137 @@
+#=================================================
+# https://github.com/iflyelf/autosys
+# Lisence: MIT
+# Author: iflyelf
+# Blog: https://www.xiaonuo.live
+#=================================================
+
+name: 更新 autosys 及依赖版本号
+
+# 通过 GitHub API / PyPI 检查最新稳定版本, 有更新时改写 Dockerfile 中的 ARG 并触发构建:
+#   SEMAPHORE_REF / VERSION  semaphoreui/semaphore 最新正式 release
+#   OPENTOFU_VERSION          opentofu/opentofu
+#   TERRAFORM_VERSION         hashicorp/terraform
+#   TERRAGRUNT_VERSION        gruntwork-io/terragrunt
+#   ANSIBLE_VERSION           PyPI ansible
+on:
+  # 定时检查(中国时间每天早4点, UTC 前一天20点; 早于镜像构建的5点)
+  schedule:
+    - cron: '0 20 * * *'
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'update autosys & deps version'
+        required: false
+        default: 'manual check'
+
+# 同一分支仅保留最新一次检查
+concurrency:
+  group: update-version-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: 检查并更新版本号
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euo pipefail
+
+        # 语义化版本比较: 若 $1 > $2 返回 0
+        version_gt() {
+          [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]
+        }
+
+        # 取 GitHub 仓库最新稳定 release(去掉前缀 v), 失败返回空
+        gh_latest_stable() {
+          curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/$1/releases?per_page=50" 2>/dev/null \
+            | jq -r '.[] | select(.prerelease==false and .draft==false) | .tag_name' 2>/dev/null \
+            | sed 's/^v//' \
+            | grep -E '^[0-9]+(\.[0-9]+)+$' \
+            | sort -V | tail -1 || true
+        }
+
+        pypi_latest() {
+          curl -fsSL "https://pypi.org/pypi/$1/json" 2>/dev/null | jq -r '.info.version // empty' || true
+        }
+
+        DOCKERFILE=Dockerfile
+        CHANGED=0
+        SUMMARY=""
+
+        # 通用更新函数: $1=ARG名 $2=最新版本 $3=前缀(可选, 如 v)
+        try_update() {
+          local arg="$1" latest="$2" prefix="${3:-}" current
+          [ -z "$latest" ] && { echo "  [$arg] 获取最新版本失败, 跳过"; return; }
+          current=$(grep -oP "^ARG ${arg}=\K.*" "$DOCKERFILE" | head -1 || true)
+          [ -z "$current" ] && { echo "  [$arg] Dockerfile 中未找到, 跳过"; return; }
+          current="${current#"$prefix"}"
+          if [ "$current" = "$latest" ]; then
+            echo "  [$arg] 已是最新 ($current)"
+          elif version_gt "$latest" "$current"; then
+            echo "  [$arg] 更新: $current => $latest"
+            sed -i "s|^ARG ${arg}=.*|ARG ${arg}=${prefix}${latest}|" "$DOCKERFILE"
+            CHANGED=1
+            SUMMARY="${SUMMARY}\n- ${arg}: ${current} => ${latest}"
+          else
+            echo "  [$arg] 远程版本($latest)不高于当前($current), 跳过"
+          fi
+        }
+
+        echo "===== 检查版本(仅稳定 release) ====="
+        SEMAPHORE=$(gh_latest_stable semaphoreui/semaphore)
+        try_update SEMAPHORE_REF "$SEMAPHORE" v
+        try_update VERSION "$SEMAPHORE" v
+        try_update OPENTOFU_VERSION "$(gh_latest_stable opentofu/opentofu)"
+        try_update TERRAFORM_VERSION "$(gh_latest_stable hashicorp/terraform)"
+        try_update TERRAGRUNT_VERSION "$(gh_latest_stable gruntwork-io/terragrunt)"
+        try_update ANSIBLE_VERSION "$(pypi_latest ansible)"
+
+        echo ""
+        if [ "$CHANGED" = "1" ]; then
+          echo "检测到版本更新:"
+          echo -e "$SUMMARY"
+          {
+            echo "SUMMARY<<EOF"
+            echo -e "$SUMMARY"
+            echo "EOF"
+            echo "CHANGED=1"
+          } >> "$GITHUB_ENV"
+        else
+          echo "所有版本均为最新, 无需更新"
+          echo "CHANGED=0" >> "$GITHUB_ENV"
+        fi
+
+    # 提交 Dockerfile 变更; 使用 GITHUB_TOKEN 推送不会触发 push 事件,
+    # 因此显式 dispatch 构建工作流
+    - name: 提交更新并触发构建
+      if: env.CHANGED == '1'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add Dockerfile
+        git commit -m "chore: 自动更新 autosys 及依赖版本号$(echo -e "${SUMMARY}")"
+        git push
+        gh workflow run docker-publish.yml --ref "${GITHUB_REF_NAME}"
+
+    - name: 删除旧的GitHub-workflow
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        repository: ${{ github.repository }}
+        retain_days: 1
+        keep_minimum_runs: 3
