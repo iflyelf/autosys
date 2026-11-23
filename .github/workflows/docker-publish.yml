@@ -27,7 +27,8 @@ on:
       - 'Dockerfile'
       - 'scripts/**'
       - 'i18n/**'
-      - 'conf/**'
+      # 只监听真正进入镜像的 conf 目录(conf/mysql 仅供 docker-compose 使用)
+      - 'conf/ansible/**'
       - '.github/workflows/docker-publish.yml'
   # 手动触发工作流 (可指定上游版本 Tag, 留空自动取最新正式版)
   workflow_dispatch:
