@@ -247,12 +247,15 @@ jobs:
         run: |
           set -euo pipefail
           for repo in "${DOCKERHUB_REPO}" "${SWR_REPO}"; do
-            out=$(docker manifest inspect "${repo}:latest")
-            echo "$out" | grep -q 'linux/amd64'
-            echo "$out" | grep -q 'linux/arm64'
-            echo "✅ ${repo}:latest 包含 amd64 + arm64"
-            docker manifest inspect "${repo}:${VERSION}" > /dev/null
-            echo "✅ ${repo}:${VERSION} 存在"
+            for tag in latest "${VERSION}"; do
+              out=$(docker manifest inspect "${repo}:${tag}")
+              # docker manifest inspect 输出 JSON, 平台信息在 manifests[].platform 里
+              echo "$out" | jq -e '
+                [.manifests[].platform | select(.os == "linux") | .architecture]
+                | (index("amd64") != null) and (index("arm64") != null)
+              ' > /dev/null
+              echo "✅ ${repo}:${tag} 包含 amd64 + arm64"
+            done
           done
 
       # 华为云 SWR 镜像仓库默认私有，push 后调用 SWR API 设为公开
