@@ -1,0 +1,172 @@
+#=================================================
+#  autosys + MySQL 8.4（Percona Server）
+#  启动: cp .env.example .env && docker compose -f docker-compose-mysql.yml up -d
+#
+#  说明:
+#   - 数据库镜像与配置沿用 mysql-docker 项目: iflyelf/mysql(Percona Server 8.4 LTS),
+#     启动时按容器 CPU/内存自动调优, 内置 my.cnf 默认值即可直接运行
+#   - 网络为 autosys 专用(桥名 autosys_net), 固定 IPv4 + IPv6;
+#     网段避让 mysql-docker(172.21.4/5)、postgres-docker(172.22.0/1)、php-docker(172.21.0):
+#       autosys_net = 172.21.7.0/24 + fe99:7::/64
+#   - 数据库端口默认不映射到宿主机(仅容器内互访), 需要外部连接时取消注释 ports
+#   - 默认密码 ysyh!9Sky, 生产环境请在 .env 中修改
+#=================================================
+name: autosys-mysql
+
+services:
+
+  # ---------------------------------------------------------------
+  #  MySQL 8.4 数据库
+  # ---------------------------------------------------------------
+  mysql:
+    # 模拟一个伪终端
+    tty: true
+    # 打开标准输入, 可以接受外部输入
+    stdin_open: true
+    # 主机名(autosys 通过该名称连接)
+    hostname: mysql
+    # 指定容器名称
+    container_name: autosys-mysql
+    # 指定为镜像名称或镜像ID
+    # Docker Hub:   iflyelf/mysql:latest
+    # 华为云 SWR:   swr.cn-east-3.myhuaweicloud.com/iflyelf/mysql:latest
+    image: iflyelf/mysql:latest
+    # 覆盖容器启动后默认执行的命令
+    command:
+     - mysqld
+    # 指定容器退出后的重启策略为始终重启
+    restart: always
+    # 数据卷所挂载路径设置
+    volumes:
+      # 数据目录(可读写)
+      - ./data/mysql:/var/lib/mysql:rw,cached
+      # autosys 专用参数覆盖(关闭 MGR 的 sql_require_primary_key 约束, 否则迁移失败)
+      - ./conf/mysql/conf.d/zz-autosys.cnf:/etc/mysql/conf.d/zz-autosys.cnf:ro,cached
+      # 同步宿主机时区与时间
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
+      - /etc/localtime:/etc/localtime:ro,cached
+    # 环境变量
+    environment:
+      TZ: Asia/Shanghai
+      # 业务库与业务账号(autosys 用该账号连接)
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-autosys}
+      MYSQL_USER: ${MYSQL_USER:-autosys}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-ysyh!9Sky}
+      # 超级用户密码
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ysyh!9Sky}
+      # root 允许来源(默认 %)
+      MYSQL_ROOT_HOST: ${MYSQL_ROOT_HOST:-%}
+      # 自动调优(默认开启): 按容器 CPU/内存计算容量类参数
+      # 需要固定资源口径时取消注释并修改:
+      # MYSQL_MEMORY_LIMIT: 4Gi
+      # MYSQL_CPU_LIMIT: "2"
+      # MYSQL_IOPS: "4000"
+      # MYSQL_MAX_CONNECTIONS: "300"
+    # 配置容器连接的网络
+    networks:
+      autosys_net:
+        ipv4_address: 172.21.7.2
+        ipv6_address: fe99:7::2
+    # 暴露端口信息(默认不映射; 需要宿主机直连时取消注释)
+    # ports:
+    # - "3306:3306"     # MySQL 协议
+    # - "33060:33060"   # X Protocol
+    # 指定容器的 ulimits 限制值
+    ulimits:
+      nproc: 65535
+      nofile:
+          soft: 65535
+          hard: 65535
+    # 健康检查(仅探测服务存活, 不校验账号)
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin --protocol=socket --socket=/var/run/mysqld/mysqld.sock ping >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  # ---------------------------------------------------------------
+  #  autosys 自动化平台
+  # ---------------------------------------------------------------
+  autosys:
+    # 模拟一个伪终端
+    tty: true
+    # 打开标准输入, 可以接受外部输入
+    stdin_open: true
+    # 主机名
+    hostname: autosys
+    # 指定容器名称
+    container_name: autosys
+    # 指定为镜像名称或镜像ID
+    # Docker Hub:   iflyelf/autosys:latest
+    # 华为云 SWR:   swr.cn-east-3.myhuaweicloud.com/iflyelf/autosys:latest
+    image: ${AUTOSYS_IMAGE:-iflyelf/autosys:latest}
+    # 指定容器退出后的重启策略为始终重启
+    restart: always
+    # 数据卷所挂载路径设置
+    volumes:
+      # 配置文件(config.json / requirements.txt)
+      - ./config:/etc/autosys:rw,cached
+      # SQLite 数据库与临时数据(使用 MySQL 时仅存放临时文件)
+      - ./data/autosys:/var/lib/autosys:rw,cached
+      # 同步宿主机时区与时间
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
+      - /etc/localtime:/etc/localtime:ro,cached
+    # 环境变量
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      # ---------- 数据库 ----------
+      SEMAPHORE_DB_DIALECT: mysql
+      # 通过服务名走容器网络
+      SEMAPHORE_DB_HOST: mysql:3306
+      SEMAPHORE_DB_USER: ${MYSQL_USER:-autosys}
+      SEMAPHORE_DB_PASS: ${MYSQL_PASSWORD:-ysyh!9Sky}
+      SEMAPHORE_DB: ${MYSQL_DATABASE:-autosys}
+      # ---------- 首次启动创建的管理员 ----------
+      SEMAPHORE_ADMIN: ${SEMAPHORE_ADMIN:-admin}
+      SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:-ysyh!9Sky}
+      SEMAPHORE_ADMIN_NAME: ${SEMAPHORE_ADMIN_NAME:-管理员}
+      SEMAPHORE_ADMIN_EMAIL: ${SEMAPHORE_ADMIN_EMAIL:-admin@localhost}
+      # 密钥存储加密 key(强烈建议设置, 生成: head -c32 /dev/urandom | base64)
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION:-}
+      # 计划任务时区
+      SEMAPHORE_SCHEDULE_TIMEZONE: ${TZ:-Asia/Shanghai}
+    # 配置容器连接的网络
+    networks:
+      autosys_net:
+        ipv4_address: 172.21.7.3
+        ipv6_address: fe99:7::3
+    # 暴露端口信息
+    ports:
+    - "${AUTOSYS_PORT:-3000}:3000"
+    # 解决容器的依赖(等数据库健康后再启动)
+    depends_on:
+      mysql:
+        condition: service_healthy
+    # 指定容器的 ulimits 限制值
+    ulimits:
+      nproc: 65535
+      nofile:
+          soft: 65535
+          hard: 65535
+
+networks:
+  # 网络名称/桥名以组件名 autosys_ 开头, 网段避让 mysql / pg / php 等项目已占用段
+  autosys_net:
+    driver: bridge
+    enable_ipv6: true
+    driver_opts:
+      com.docker.network.bridge.name: autosys_net
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_forwarding: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
+      com.docker.network.bridge.host_binding_ipv6: "::/0"
+      com.docker.network.driver.mtu: 1500
+    ipam:
+      driver: default
+      config:
+      - subnet: 172.21.7.0/24
+        gateway: 172.21.7.1
+      - subnet: fe99:7::/64
+        gateway: fe99:7::1

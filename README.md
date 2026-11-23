@@ -56,15 +56,41 @@ autosys（自动化平台）是 [Semaphore UI](https://github.com/semaphoreui/se
 
 ### Docker Compose（推荐）
 
+仓库提供三份 compose 文件，按需要的数据库选一份：
+
+| 文件 | 数据库 | 说明 |
+|------|--------|------|
+| [`docker-compose.yml`](./docker-compose.yml) | SQLite | 最简，单文件数据库，适合小规模 |
+| [`docker-compose-mysql.yml`](./docker-compose-mysql.yml) | MySQL 8.4（Percona） | 沿用 [mysql-docker](https://github.com/iflyelf/mysql-docker) 镜像与调优，适合生产 |
+| [`docker-compose-postgres.yml`](./docker-compose-postgres.yml) | PostgreSQL | 沿用 [postgres-docker](https://github.com/iflyelf/postgres-docker) 镜像与调优，适合生产 |
+
+三份文件的数据库密码默认都是 `ysyh!9Sky`，管理员密码也是 `ysyh!9Sky`。
+**生产环境请先 `cp .env.example .env` 并修改密码**，然后启动：
+
 ```bash
-mkdir -p autosys && cd autosys
-curl -fsSLO https://raw.githubusercontent.com/iflyelf/autosys/main/docker-compose.yml
-# 修改 SEMAPHORE_ADMIN_PASSWORD 等配置
+# SQLite
 docker compose up -d
+
+# MySQL
+docker compose -f docker-compose-mysql.yml up -d
+
+# PostgreSQL
+docker compose -f docker-compose-postgres.yml up -d
+
 docker logs -f autosys
 ```
 
-浏览器打开 `http://<宿主机IP>:3000`，用 `SEMAPHORE_ADMIN` / `SEMAPHORE_ADMIN_PASSWORD` 登录。
+浏览器打开 `http://<宿主机IP>:3000`，用 `.env` 里的 `SEMAPHORE_ADMIN` / `SEMAPHORE_ADMIN_PASSWORD` 登录。
+
+两份数据库 compose 的约定：
+
+- 数据库端口默认**不映射**到宿主机，只有 autosys 容器内互访；需要外部连接时取消 compose 里的 `ports` 注释。
+- 网络为 autosys 专用（桥名 `autosys_net` / `autosys_pg_net`），固定 IPv4 + IPv6，
+  网段避让 mysql-docker（172.21.4/5）、postgres-docker（172.22.0/1）、php-docker（172.21.0）。
+- autosys 等数据库 `healthcheck` 通过后才启动。
+- MySQL 会挂载 [`conf/mysql/conf.d/zz-autosys.cnf`](./conf/mysql/conf.d/zz-autosys.cnf)：
+  `iflyelf/mysql` 镜像为 MGR 组复制默认开启了 `sql_require_primary_key`，
+  而 Semaphore 有部分历史表没有主键，不关掉会报 `Error 3750`，迁移直接失败。
 
 ### docker run
 

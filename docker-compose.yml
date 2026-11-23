@@ -1,47 +1,68 @@
+#=================================================
+#  autosys + SQLite（最简部署）
+#  启动: cp .env.example .env && docker compose up -d
+#
+#  说明:
+#   - 无需外部数据库, 数据落在 ./data/autosys/database.sqlite
+#   - 需要 MySQL / PostgreSQL 请改用:
+#       docker compose -f docker-compose-mysql.yml up -d
+#       docker compose -f docker-compose-postgres.yml up -d
+#   - 默认密码 ysyh!9Sky, 生产环境请在 .env 中修改
+#=================================================
+name: autosys
+
 services:
 
   # 服务名
   autosys:
+    # 模拟一个伪终端
+    tty: true
+    # 打开标准输入, 可以接受外部输入
+    stdin_open: true
+    # 主机名
+    hostname: autosys
     # 指定容器名称
     container_name: autosys
     # 指定为镜像名称或镜像ID
-    image: iflyelf/autosys:latest
-    # 国内推荐改用华为云 SWR:
-    # image: swr.cn-east-3.myhuaweicloud.com/iflyelf/autosys:latest
+    # Docker Hub:   iflyelf/autosys:latest
+    # 华为云 SWR:   swr.cn-east-3.myhuaweicloud.com/iflyelf/autosys:latest
+    image: ${AUTOSYS_IMAGE:-iflyelf/autosys:latest}
     # 指定容器退出后的重启策略为始终重启
     restart: always
-    # 端口映射 (使用 network_mode: host 时删除)
-    ports:
-      - "3000:3000"
     # 数据卷所挂载路径设置
     volumes:
-      # 配置文件 (config.json / requirements.txt)
-      - ./config:/etc/autosys
-      # SQLite 数据库
-      - ./data:/var/lib/autosys
+      # 配置文件(config.json / requirements.txt)
+      - ./config:/etc/autosys:rw,cached
+      # SQLite 数据库与临时数据
+      - ./data/autosys:/var/lib/autosys:rw,cached
       # 同步宿主机时区与时间
-      - /etc/localtime:/etc/localtime:ro
+      - /usr/share/zoneinfo:/usr/share/zoneinfo:ro,cached
+      - /etc/localtime:/etc/localtime:ro,cached
     # 环境变量
     environment:
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
       # 数据库: sqlite / mysql / postgres
       SEMAPHORE_DB_DIALECT: sqlite
       # 使用 mysql / postgres 时设置:
       # SEMAPHORE_DB_HOST: mysql:3306
       # SEMAPHORE_DB_USER: autosys
-      # SEMAPHORE_DB_PASS: change-me
+      # SEMAPHORE_DB_PASS: ysyh!9Sky
       # SEMAPHORE_DB: autosys
       # 首次启动创建的管理员
-      SEMAPHORE_ADMIN: admin
-      SEMAPHORE_ADMIN_PASSWORD: change-me
-      SEMAPHORE_ADMIN_NAME: 管理员
-      SEMAPHORE_ADMIN_EMAIL: admin@localhost
-      # 密钥加密 key, 生成: head -c32 /dev/urandom | base64
-      # SEMAPHORE_ACCESS_KEY_ENCRYPTION: <base64 32 字节>
-      SEMAPHORE_SCHEDULE_TIMEZONE: Asia/Shanghai
+      SEMAPHORE_ADMIN: ${SEMAPHORE_ADMIN:-admin}
+      SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:-ysyh!9Sky}
+      SEMAPHORE_ADMIN_NAME: ${SEMAPHORE_ADMIN_NAME:-管理员}
+      SEMAPHORE_ADMIN_EMAIL: ${SEMAPHORE_ADMIN_EMAIL:-admin@localhost}
+      # 密钥存储加密 key(强烈建议设置, 生成: head -c32 /dev/urandom | base64)
+      SEMAPHORE_ACCESS_KEY_ENCRYPTION: ${SEMAPHORE_ACCESS_KEY_ENCRYPTION:-}
+      # 计划任务时区
+      SEMAPHORE_SCHEDULE_TIMEZONE: ${TZ:-Asia/Shanghai}
+    # 暴露端口信息
+    ports:
+    - "${AUTOSYS_PORT:-3000}:3000"
     # 指定容器的 ulimits 限制值
     ulimits:
       nproc: 65535
       nofile:
-        soft: 65535
-        hard: 65535
+          soft: 65535
+          hard: 65535

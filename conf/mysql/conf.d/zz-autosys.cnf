@@ -1,0 +1,12 @@
+#=================================================
+#  autosys 专用 MySQL 参数覆盖
+#  挂载到 /etc/mysql/conf.d/zz-autosys.cnf, 文件名以 zz- 开头确保最后加载
+#
+#  sql_require_primary_key: iflyelf/mysql 镜像内置 conf.d/mgr.cnf 为 MGR 组复制
+#  开启了该选项(写入的表必须带主键), 但 Semaphore 的历史表(如 project__user)
+#  没有主键, 迁移时会报:
+#    Error 3750 (HY000): Unable to create or change a table without a primary key
+#  单机部署 autosys 不需要 MGR, 这里关闭该约束。
+#=================================================
+[mysqld]
+sql_require_primary_key = OFF

@@ -1,4 +1,8 @@
 # docker-compose 运行期数据
 config/
 data/
+archive/
+logs/
 *.log
+# 本地环境变量(含密码)
+.env
