@@ -171,8 +171,8 @@ ARG ANSIBLE_VENV_PATH=/opt/autosys/apps/ansible/venv
 ARG PIP_INDEX_URL=https://pypi.org/simple
 RUN set -eux; \
     python3 -m venv "${ANSIBLE_VENV_PATH}" --system-site-packages; \
-    "${ANSIBLE_VENV_PATH}/bin/pip" install --no-cache-dir --index-url "${PIP_INDEX_URL}" --upgrade pip; \
-    "${ANSIBLE_VENV_PATH}/bin/pip" install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
+    "${ANSIBLE_VENV_PATH}/bin/pip" install --no-cache-dir --no-compile --index-url "${PIP_INDEX_URL}" --upgrade pip; \
+    "${ANSIBLE_VENV_PATH}/bin/pip" install --no-cache-dir --no-compile --index-url "${PIP_INDEX_URL}" \
         "ansible==${ANSIBLE_VERSION}" boto3 botocore requests pywinrm passlib paramiko jmespath netaddr; \
     find "${ANSIBLE_VENV_PATH}" -name __pycache__ -prune -exec rm -rf {} +; \
     "${ANSIBLE_VENV_PATH}/bin/ansible" --version

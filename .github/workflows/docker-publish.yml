@@ -43,8 +43,7 @@ on:
   watch:
     types: [started]
 
-# 同一分支仅保留最新一次构建：快速连续提交时自动取消旧构建，
-# 避免多个多架构（QEMU）构建并发堆积、互相拖慢导致镜像迟迟不更新。
+# 同一分支仅保留最新一次构建：快速连续提交时自动取消旧构建
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
@@ -99,38 +98,38 @@ jobs:
           echo "✅ 解析到 semaphore 版本: ${REF}"
 
   #=================================================
-  # 2. 多架构构建并推送
+  # 2. 双架构并行原生构建(不使用 QEMU 模拟, 速度提升一个数量级)
+  #    - amd64: ubuntu-latest (x64 原生)
+  #    - arm64: ubuntu-24.04-arm (arm64 原生, public 仓库免费)
+  #    每个架构先推送带后缀的单架构标签, 由 merge 作业合并成多架构清单
   #=================================================
   build:
+    name: 构建 ${{ matrix.arch }}
     needs: [resolve-version]
-    runs-on: ubuntu-latest
-    # schedule / workflow_dispatch(含 update-version.yml 自动触发) 直接放行; 其余仅限仓库所有者
+    runs-on: ${{ matrix.runner }}
+    # 原生编译通常 10~20 分钟, 超时兜底
+    timeout-minutes: 120
+    # schedule / workflow_dispatch 直接放行; 其余仅限仓库所有者
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event.repository.owner.id == github.event.sender.id
     strategy:
       fail-fast: false
       matrix:
         include:
-          - DOCKER_TAG: latest
-
-    # 权限
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
     permissions:
-      actions: write
       contents: read
-
-    # 运行步骤
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 安装 QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: all
-
       - name: 安装 docker buildx
-        id: buildx
         uses: docker/setup-buildx-action@v3
         with:
           version: latest
@@ -148,15 +147,14 @@ jobs:
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
 
-      - name: 构建镜像并发布
+      - name: 构建单架构镜像并推送
         uses: docker/build-push-action@v6
         # 华为云 SWR 不支持 OCI media types 与证明清单(attestation)，
-        # 否则报 "Invalid image, fail to parse 'manifest.json'"。
         # 关闭 provenance/sbom 并输出 Docker 媒体类型以兼容 SWR。
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: true
           pull: true
           provenance: false
@@ -170,17 +168,19 @@ jobs:
             NPM_REGISTRY=https://registry.npmjs.org
             PIP_INDEX_URL=https://pypi.org/simple
           tags: |
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ matrix.DOCKER_TAG }}
-            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
-            ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:${{ matrix.DOCKER_TAG }}
-            ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}-${{ matrix.arch }}
+            ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:latest-${{ matrix.arch }}
+            ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}-${{ matrix.arch }}
+          # 每架构独立缓存作用域, 避免互相覆盖
+          cache-from: type=gha,scope=autosys-${{ matrix.arch }}
+          cache-to: type=gha,mode=min,scope=autosys-${{ matrix.arch }},ignore-error=true
 
-      # 构建后用 amd64 镜像做冒烟测试: SQLite 初始化 + 登录 + 中文界面 + ansible 可用
+      # 仅 amd64 跑冒烟测试: SQLite 初始化 + 登录 + 中文界面 + 工具链
       - name: 冒烟测试（linux/amd64）
+        if: matrix.arch == 'amd64'
         env:
-          IMAGE: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}
+          IMAGE: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ needs.resolve-version.outputs.version }}-amd64
         run: |
           set -euo pipefail
           docker pull "${IMAGE}"
@@ -189,6 +189,71 @@ jobs:
       - name: 清理冒烟测试容器
         if: always()
         run: docker rm -f autosys-smoke 2>/dev/null || true
+
+  #=================================================
+  # 3. 合并单架构镜像为多架构清单(使用 docker manifest, 产出 Docker v2
+  #    manifest list, 与华为云 SWR 兼容; buildx imagetools 会产出 OCI index)
+  #=================================================
+  merge:
+    name: 合并多架构清单
+    needs: [resolve-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 登录 DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: 登录华为云 SWR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.SWR_REGISTRY }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
+
+      - name: 生成并推送多架构清单
+        env:
+          DOCKERHUB_REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
+          SWR_REPO: ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CLI_EXPERIMENTAL=enabled
+          [ -n "${VERSION}" ] || { echo "ERROR: VERSION 为空"; exit 1; }
+          echo "autosys 版本: ${VERSION}"
+          for repo in "${DOCKERHUB_REPO}" "${SWR_REPO}"; do
+            for tag in latest "${VERSION}"; do
+              echo "==> ${repo}:${tag}  <=  ${tag}-amd64 + ${tag}-arm64"
+              docker manifest create "${repo}:${tag}" --amend \
+                "${repo}:${tag}-amd64" \
+                "${repo}:${tag}-arm64"
+              docker manifest push --purge "${repo}:${tag}"
+            done
+          done
+          echo "多架构清单合并完成"
+
+      - name: 校验多架构清单
+        env:
+          DOCKERHUB_REPO: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
+          SWR_REPO: ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/${{ env.IMAGE_NAME }}
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for repo in "${DOCKERHUB_REPO}" "${SWR_REPO}"; do
+            out=$(docker manifest inspect "${repo}:latest")
+            echo "$out" | grep -q 'linux/amd64'
+            echo "$out" | grep -q 'linux/arm64'
+            echo "✅ ${repo}:latest 包含 amd64 + arm64"
+            docker manifest inspect "${repo}:${VERSION}" > /dev/null
+            echo "✅ ${repo}:${VERSION} 存在"
+          done
 
       # 华为云 SWR 镜像仓库默认私有，push 后调用 SWR API 设为公开
       # 需 Secrets: SWR_AK / SWR_SK（华为云账号 AK/SK，具备 swr:repo:updateRepo 权限）

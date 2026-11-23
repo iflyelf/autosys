@@ -154,10 +154,17 @@ bash scripts/smoke-test.sh autosys:local
 
 | 工作流 | 触发 | 作用 |
 |--------|------|------|
-| [`docker-publish.yml`](./.github/workflows/docker-publish.yml) | push（Dockerfile / scripts / i18n / conf）、手动、每天 05:00、Star | 通过 GitHub API 解析上游最新正式 release，构建 amd64 和 arm64 镜像，推送到 Docker Hub 与华为云 SWR，再跑冒烟测试 |
+| [`docker-publish.yml`](./.github/workflows/docker-publish.yml) | push（Dockerfile / scripts / i18n / conf）、手动、每天 05:00、Star | 解析上游最新正式 release 后构建镜像，推送到 Docker Hub 与华为云 SWR，冒烟测试通过后合并多架构清单 |
 | [`update-version.yml`](./.github/workflows/update-version.yml) | 每天 04:00、手动 | 检查 semaphore、OpenTofu、Terraform、Terragrunt、Ansible 的最新稳定版，有更新就改写 Dockerfile 的 `ARG`、提交，并触发构建 |
 
 两个工作流都配置了 `concurrency`，同一分支只保留最新一次运行。手动构建时可以在 `version` 输入框指定上游 Tag。
+
+### 构建方式（不用 QEMU）
+
+`amd64` 和 `arm64` 在两个**原生 runner** 上并行构建（`ubuntu-latest` 和 `ubuntu-24.04-arm`），
+各自先推送 `latest-amd64`、`latest-arm64` 这类单架构标签，最后由 `merge` 作业用
+`docker manifest` 合并成多架构清单。整个过程不需要 QEMU 模拟，构建时间从约 2 小时降到 10~20 分钟，
+产出的仍是 Docker v2 manifest list，华为云 SWR 可以正常拉取。
 
 ### 所需 Secrets
 
