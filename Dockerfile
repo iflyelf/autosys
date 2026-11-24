@@ -84,7 +84,7 @@ RUN --mount=type=cache,target=/opt/golang/pkg/mod \
     ls -lh /out
 
 # IaC 工具: OpenTofu / Terraform / Terragrunt (版本由 update-version.yml 自动更新)
-ARG OPENTOFU_VERSION=1.13.9
+ARG OPENTOFU_VERSION=1.13.10
 ARG TERRAFORM_VERSION=1.17.2
 ARG TERRAGRUNT_VERSION=1.2.2
 RUN set -eux; \
@@ -165,7 +165,7 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Ansible 安装在独立 venv 中 (版本由 update-version.yml 跟随 PyPI 自动更新)
-ARG ANSIBLE_VERSION=13.5.0
+ARG ANSIBLE_VERSION=15.0.0
 ENV ANSIBLE_VERSION=${ANSIBLE_VERSION}
 ARG ANSIBLE_VENV_PATH=/opt/autosys/apps/ansible/venv
 ARG PIP_INDEX_URL=https://pypi.org/simple
