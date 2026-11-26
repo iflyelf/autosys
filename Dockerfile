@@ -86,7 +86,7 @@ RUN --mount=type=cache,target=/opt/golang/pkg/mod \
 # IaC 工具: OpenTofu / Terraform / Terragrunt (版本由 update-version.yml 自动更新)
 ARG OPENTOFU_VERSION=1.13.10
 ARG TERRAFORM_VERSION=1.17.2
-ARG TERRAGRUNT_VERSION=1.2.2
+ARG TERRAGRUNT_VERSION=1.2.3
 RUN set -eux; \
     arch="${TARGETARCH:-amd64}"; \
     tmp="$(mktemp -d)"; \
